@@ -1,98 +1,146 @@
-
+# ============================================
+# 👈 1. IMPORT LIBRARIES
+# ============================================
 import streamlit as st
-import pandas as pd
 import torch
-import torch.nn as nn
+import pickle
 import folium
 import numpy as np
-import networkx as nx
+import torch.nn as nn
+from torch_geometric.data import Data
+from torch_geometric.nn import GCNConv
+from streamlit_folium import folium_static
 import seaborn as sns
 import matplotlib.pyplot as plt
-from torch_geometric.data import Data
-from streamlit_folium import folium_static
-from sklearn.preprocessing import MinMaxScaler
+import pandas as pd
 
-# ✅ Define STGNN Model
-class STGNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+# ============================================
+# 👈 2. STGNN MODEL CLASS
+# ============================================
+class STGNN(torch.nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers, dropout):
         super(STGNN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.2)
-    
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
+        self.convs = torch.nn.ModuleList()
+        self.convs.append(GCNConv(input_dim, hidden_dim))
+
+        for _ in range(num_layers - 1):
+            self.convs.append(GCNConv(hidden_dim, hidden_dim))
+
+        self.fc = torch.nn.Linear(hidden_dim, output_dim)
+        self.dropout = torch.nn.Dropout(dropout)
+
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
+
+        for conv in self.convs:
+            x = torch.relu(conv(x, edge_index))
+            x = self.dropout(x)
+
+        x = self.fc(x)
         return x
 
-# ✅ Load Trained STGNN Model
+# ============================================
+# 👈 3. LSTM MODEL CLASS
+# ============================================
+class LSTMModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, output_dim):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        x = self.fc(lstm_out[:, -1, :])
+        return x
+
+# ============================================
+# 👈 4. LOAD MODELS AND GRAPH
+# ============================================
 @st.cache_resource
-def load_model():
-    model = STGNN(input_dim=5, hidden_dim=64, output_dim=4)
-    model.load_state_dict(torch.load("stgnn_model.pth", map_location=torch.device("cpu")))
-    model.eval()
-    return model
+def load_models():
+    try:
+        # Load the graph and dataset
+        with open("/content/drive/MyDrive/data/graph.pkl", "rb") as f:
+            G = pickle.load(f)
 
-# ✅ Generate Fake Data for Locations
-def get_location_data(location):
-    data = {
-        "Aurangabad": [50, 0.3, 25, 0.5, 15],
-        "Beed": [40, 0.2, 30, 0.6, 10],
-        "Jalna": [60, 0.4, 20, 0.4, 20],
-        "Latur": [55, 0.35, 28, 0.55, 12],
-        "Usmanabad": [45, 0.25, 22, 0.45, 18]
-    }
-    return data.get(location, [50, 0.3, 25, 0.5, 15])  # Default values
+        # Load STGNN Model
+        stgnn_config = {
+            'input_dim': 5,
+            'hidden_dim': 64,
+            'output_dim': 4,
+            'num_layers': 2,
+            'dropout': 0.2,
+        }
+        stgnn_model = STGNN(**stgnn_config)
+        stgnn_model.load_state_dict(torch.load("/content/drive/MyDrive/data/stgnn_model.pt", map_location=torch.device("cpu")))
+        stgnn_model.eval()
 
-# ✅ Create Map Visualization
-def create_map(predictions):
-    m = folium.Map(location=[19.7515, 75.7139], zoom_start=7)
+        # Load LSTM Model (Placeholder Weights)
+        lstm_model = LSTMModel(input_dim=5, hidden_dim=64, num_layers=2, output_dim=4)
+        lstm_model.eval()
+        
+        return stgnn_model, lstm_model, G
+    except Exception as e:
+        st.error(f"⚠️ Model Loading Failed: {e}")
+        return None, None, None
 
-    color_map = {0: "red", 1: "orange", 2: "yellow", 3: "green"}
-    locations = {
-        "Aurangabad": [19.8762, 75.3433],
-        "Beed": [18.9894, 75.7600],
-        "Jalna": [19.8410, 75.8860],
-        "Latur": [18.4088, 76.5604],
-        "Usmanabad": [18.1860, 76.0410]
-    }
+# ============================================
+# 👈 5. USER INPUT: SELECT LOCATION & FEATURES
+# ============================================
+st.set_page_config(page_title="Drought Prediction", page_icon="🌍", layout="wide")
 
-    for loc, coords in locations.items():
-        folium.Marker(
-            location=coords,
-            popup=f"{loc}: Risk Level {predictions[loc]}",
-            icon=folium.Icon(color=color_map[predictions[loc]])
-        ).add_to(m)
-    
-    return m
+st.title("🌍 STGNN & LSTM-Based Drought Prediction")
+st.markdown("Predict drought severity using Graph Neural Networks and LSTMs.")
 
-# ✅ Streamlit App UI
-st.title("🌍 STGNN-Based Drought Prediction")
+# Sidebar: Select Location & Features
+st.sidebar.header("📍 Select Location & Input Features")
 
-# Sidebar: Select Location
-location = st.sidebar.selectbox("Select a Location", ["Aurangabad", "Beed", "Jalna", "Latur", "Usmanabad"])
+location = st.sidebar.selectbox("📍 Choose a Location", ["Aurangabad", "Beed", "Jalna", "Latur", "Usmanabad"])
 
-# Load Model
-model = load_model()
+# Dynamic Feature Inputs (Sliders)
+temperature = st.sidebar.slider("🌡 Temperature (°C)", 20, 60, 40)
+ndvi = st.sidebar.slider("🌱 NDVI Index", 0.0, 1.0, 0.3)
+soil_moisture = st.sidebar.slider("💧 Soil Moisture (%)", 0, 50, 25)
+precipitation = st.sidebar.slider("🌧 Precipitation (mm)", 0.0, 1.0, 0.5)
+humidity = st.sidebar.slider("🌬 Humidity (%)", 0, 100, 15)
 
-# Get Data for Selected Location
-input_features = get_location_data(location)
+# ============================================
+# 👈 6. LOAD MODELS & MAKE PREDICTIONS
+# ============================================
+stgnn_model, lstm_model, G = load_models()
+if stgnn_model is None or lstm_model is None:
+    st.error("🚨 Models not loaded. Please check the files and try again.")
+    st.stop()
 
-# Predict
-input_tensor = torch.tensor(input_features, dtype=torch.float32).unsqueeze(0)
-prediction = model(input_tensor).argmax().item()
+# Convert user input to tensors
+input_features = torch.tensor([[temperature, ndvi, soil_moisture, precipitation, humidity]], dtype=torch.float)
+edge_index = torch.tensor([[0], [0]], dtype=torch.long)  # Single-node prediction
+
+data = Data(x=input_features, edge_index=edge_index)
+
+# Run STGNN Prediction
+with torch.no_grad():
+    stgnn_prediction = stgnn_model(data).argmax().item()
+
+# Run LSTM Prediction
+lstm_input = input_features.unsqueeze(0)
+with torch.no_grad():
+    lstm_prediction = lstm_model(lstm_input).argmax().item()
 
 # Drought Risk Categories
 drought_classes = {0: "Severe Drought", 1: "Moderate Drought", 2: "Mild Drought", 3: "No Drought"}
 
-# Display Prediction
-st.write(f"### 📍 Location: {location}")
-st.write(f"### 🔥 Predicted Drought Risk: **{drought_classes[prediction]}**")
+# Display Prediction Results
+st.subheader(f"📍 Location: **{location}**")
+st.subheader(f"🔥 STGNN Predicted Drought Risk: **{drought_classes[stgnn_prediction]}**")
+st.subheader(f"📈 LSTM Predicted Trend: **{drought_classes[lstm_prediction]}**")
 
-# Map Visualization
-predictions = {location: prediction}
-st.write("### 🌍 Drought Risk Map")
-folium_static(create_map(predictions))
-
+# ============================================
+# 👈 7. FEATURE VISUALIZATION
+# ============================================
+feature_data = pd.DataFrame({"Feature": ["Temperature", "NDVI", "Soil Moisture", "Precipitation", "Humidity"],"Value": [temperature, ndvi, soil_moisture, precipitation, humidity]})
+fig, ax = plt.subplots(figsize=(8, 4))
+sns.barplot(data=feature_data, x="Feature", y="Value", palette="coolwarm", ax=ax)
+ax.set_ylabel("Value")
+ax.set_title("Feature Distribution")
+st.pyplot(fig)
